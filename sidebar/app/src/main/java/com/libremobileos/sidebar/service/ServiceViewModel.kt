@@ -11,6 +11,8 @@ import android.content.Intent
 import android.content.Intent.ACTION_PROFILE_AVAILABLE
 import android.content.Intent.ACTION_PROFILE_UNAVAILABLE
 import android.content.IntentFilter
+import android.content.SharedPreferences
+import android.content.SharedPreferences.OnSharedPreferenceChangeListener
 import android.content.pm.LauncherApps
 import android.content.pm.PackageManager
 import android.os.Handler
@@ -25,6 +27,7 @@ import com.libremobileos.sidebar.app.SidebarApplication
 import com.libremobileos.sidebar.bean.AppInfo
 import com.libremobileos.sidebar.room.DatabaseRepository
 import com.libremobileos.sidebar.room.SidebarAppsEntity
+import com.libremobileos.sidebar.ui.sidebar.SidebarSettingsActivity
 import com.libremobileos.sidebar.utils.Logger
 import com.libremobileos.sidebar.utils.contains
 import com.libremobileos.sidebar.utils.getBadgedIcon
@@ -59,10 +62,22 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
     private val launcherApps = application.getSystemService(Context.LAUNCHER_APPS_SERVICE)!! as LauncherApps
     private val appPredictionManager = application.getSystemService(AppPredictionManager::class.java)
     private val userManager = application.getSystemService(UserManager::class.java)!!
+    private val sharedPrefs = appContext.getSharedPreferences(SidebarApplication.CONFIG, Context.MODE_PRIVATE)
 
     private var appPredictor: AppPredictor? = null
     private val handlerExecutor = HandlerExecutor(Handler())
     private var callbacksRegistered = false
+    private var showPredictedApps = sharedPrefs.getBoolean(KEY_SHOW_PREDICTED_APPS, true)
+        set(value) {
+            if (field == value) return
+            field = value
+            if (value) {
+                registerAppPredictionCallback()
+            } else {
+                unregisterAppPredictionCallback()
+                predictedAppList.value = emptyList()
+            }
+        }
 
     val allAppActivity = AppInfo(
         "",
@@ -117,6 +132,7 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
 
     private val appPredictionCallback = object : AppPredictor.Callback {
         override fun onTargetsAvailable(targets: List<AppTarget>) {
+            if (!showPredictedApps) return
             logger.d("appPredictionCallback targets: ${targets.size}")
             predictedAppList.value = targets
                 .take(MAX_PREDICTED_APPS)
@@ -174,10 +190,21 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
         }
     }
 
+    private val sharedPrefsListener = object : OnSharedPreferenceChangeListener {
+        override fun onSharedPreferenceChanged(prefs: SharedPreferences, key: String?) {
+            when (key) {
+                KEY_SHOW_PREDICTED_APPS -> {
+                    showPredictedApps = sharedPrefs.getBoolean(KEY_SHOW_PREDICTED_APPS, true)
+                }
+            }
+        }
+    }
+
     companion object {
         private const val ALL_APP_PACKAGE = "com.libremobileos.sidebar"
         private const val ALL_APP_ACTIVITY = "com.libremobileos.sidebar.ui.all_app.AllAppActivity"
         private const val MAX_PREDICTED_APPS = 6
+        const val KEY_SHOW_PREDICTED_APPS = "sidebar_show_predicted_apps"
     }
 
     init {
@@ -189,7 +216,8 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
         logger.d("registerCallbacks")
         initSidebarAppList()
         launcherApps.registerCallback(launcherAppsCallback)
-        registerAppPredictionCallback()
+        if (showPredictedApps) registerAppPredictionCallback()
+        sharedPrefs.registerOnSharedPreferenceChangeListener(sharedPrefsListener)
         registerUserProfileReceiver()
         callbacksRegistered = true
     }
@@ -198,7 +226,8 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
         if (!callbacksRegistered) return
         logger.d("unregisterCallbacks")
         launcherApps.unregisterCallback(launcherAppsCallback)
-        appPredictor?.unregisterPredictionUpdates(appPredictionCallback)
+        sharedPrefs.unregisterOnSharedPreferenceChangeListener(sharedPrefsListener)
+        if (showPredictedApps) unregisterAppPredictionCallback()
         appContext.unregisterReceiver(userProfileReceiver)
         viewModelScope.coroutineContext.cancelChildren()
         callbacksRegistered = false
@@ -207,6 +236,14 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
     fun destroy() {
         logger.d("destroy")
         runCatching { viewModelScope.cancel() }
+    }
+
+    fun openSidebarSettings() {
+        appContext.startActivity(
+            Intent(appContext, SidebarSettingsActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
     }
 
     private fun registerAppPredictionCallback() {
@@ -223,6 +260,10 @@ class ServiceViewModel(private val application: Application): AndroidViewModel(a
             registerPredictionUpdates(handlerExecutor, appPredictionCallback)
             requestPredictionUpdate()
         }
+    }
+
+    private fun unregisterAppPredictionCallback() {
+        appPredictor?.unregisterPredictionUpdates(appPredictionCallback)
     }
 
     private fun registerUserProfileReceiver() {
